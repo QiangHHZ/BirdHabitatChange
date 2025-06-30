@@ -1,0 +1,97 @@
+
+Note: This script should run in Google Earth Engine (GEE)
+
+// ======================= 1. Define Land Cover Type Range =======================
+var levelStart = 1400;  // Terrestrial Artificial
+var levelEnd = 1500;    // Aquatic Artificial
+
+// ======================= 2. Build Image Collection for Each Year =======================
+var level1_IC = ee.ImageCollection([
+  lvl1_2000, lvl1_2001, lvl1_2002, lvl1_2003, lvl1_2004, lvl1_2005,
+  lvl1_2006, lvl1_2007, lvl1_2008, lvl1_2009, lvl1_2010, lvl1_2011,
+  lvl1_2012, lvl1_2013, lvl1_2014, lvl1_2015, lvl1_2016, lvl1_2017,
+  lvl1_2018, lvl1_2019, lvl1_2020
+]);
+
+// ======================= 3. Select Land Cover Types (Masking) =======================
+var selectLevel = function(image) {
+  return image.gte(levelStart).and(image.lte(levelEnd)).selfMask().unmask();
+};
+
+var level1_IC_selected = level1_IC.map(selectLevel);
+
+// ======================= 4. Aggregate to 50km Resolution =======================
+var scale = 50000;
+
+var aggregateLevel = function(image) {
+  return image
+    .reduceResolution({
+      reducer: ee.Reducer.mean(),
+      maxPixels: 65536
+    })
+    .reproject({
+      scale: scale,
+      crs: 'EPSG:4326'
+    });
+};
+
+var level1_IC_selected_aggregated = level1_IC_selected.map(aggregateLevel);
+
+// ======================= 5. Add Year Band and Format as Integer Percentage =======================
+var startYear = 2000;
+var level1_IC_selected_aggregated_addYear = ee.ImageCollection(
+  ee.List.sequence(0, 20).map(function(index) {
+    var image = ee.Image(level1_IC_selected_aggregated.toList(21).get(index));
+    var year = ee.Number(startYear).add(index);
+    var yearBand = ee.Image.constant(year).toInt16().rename('year');
+    return yearBand
+      .addBands(image.select("comp_first").multiply(100).toInt16())  // Convert to percentage (0-100)
+      .set('year', year);
+  })
+);
+
+// ======================= 6. Extract Images for 2000 and 2020 and Compute Difference =======================
+var level2000 = level1_IC_selected_aggregated_addYear
+  .filter(ee.Filter.eq('year', 2000))
+  .first()
+  .select('comp_first')
+  .toFloat();
+
+var level2020 = level1_IC_selected_aggregated_addYear
+  .filter(ee.Filter.eq('year', 2020))
+  .first()
+  .select('comp_first')
+  .toFloat();
+
+var level_diff = level2020.subtract(level2000).rename('level_diff');
+
+// ======================= 7. Visualization Preview =======================
+Map.centerObject(level_diff, 3);
+Map.addLayer(level2000, {min: 0, max: 100, palette: ['white', 'blue']}, 'Year 2000');
+Map.addLayer(level2020, {min: 0, max: 100, palette: ['white', 'green']}, 'Year 2020');
+Map.addLayer(level_diff, {min: -50, max: 50, palette: ['red', 'white', 'green']}, 'Change (2020-2000)');
+
+// ======================= 8. Create 5° Longitude Grid =======================
+var outputPath = 'Bird_LUC'; // Google Drive folder
+var lonInterval = 5;
+
+var gridRegions = [];
+for (var lon = -180; lon < 180; lon += lonInterval) {
+  var gridCell = ee.Geometry.Rectangle([lon, -90, lon + lonInterval, 90], 'EPSG:4326', false);
+  gridRegions.push(gridCell);
+}
+
+// ======================= 9. Export Images for Each Grid =======================
+gridRegions.forEach(function(region, index) {
+  var fileName = 'GridRegion_' + index;
+
+  // Export the difference image
+  Export.image.toDrive({
+    image: level_diff.clip(region),
+    description: 'level1_' + levelStart + "_" + levelEnd + "_Diff2020_2000_" + fileName,
+    folder: outputPath,
+    scale: 50000,
+    region: region,
+    maxPixels: 1e13
+  });
+});

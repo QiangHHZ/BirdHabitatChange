@@ -1,0 +1,111 @@
+
+Note: This script should run in R
+
+# ============================== #
+#   Workspace Setup and Libraries
+# ============================== #
+
+setwd("..")
+setwd("./Figure_Change")  
+getwd()  
+
+library(terra)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(sf)
+
+# ============================== #
+#     Global Analysis
+# ============================== #
+
+# ---- Load Raster Data (2000 & 2022) ---- #
+habitat_2000 <- rast("./Figure_Habitat_level/IUCN_HabitatClassification_Composite_lvl1_2000.tif")
+habitat_2022 <- rast("./Figure_Habitat_level/IUCN_HabitatClassification_Composite_lvl1_2022.tif")
+print(habitat_2000)
+print(habitat_2022)
+
+# ---- Projection and Resolution ---- #
+if (!compareGeom(habitat_2000, habitat_2022, stopOnError = FALSE)) {
+  habitat_2022 <- resample(habitat_2022, habitat_2000, method = "near")
+}
+
+# ---- Raster Stack ---- #
+habitat_stack <- c(habitat_2000, habitat_2022)
+names(habitat_stack) <- c("y2000", "y2022")
+
+# ---- Compute Change Matrix ---- #
+change_table <- crosstab(habitat_stack)
+print(change_table)
+
+# Save 
+write.csv(change_table, "./Habitat_Change_2000_2022.csv", row.names = FALSE)
+
+# ============================== #
+#      Realms Analysis
+# ============================== #
+
+# ---- Load Realms ---- #
+realms_shp <- st_read("../1 Data/Wallace_zoogeographic_ZhanYue/newValisBorder.shp")
+realms_shp <- realms_shp[realms_shp$name != "Antarctica", ]
+print(realms_shp)
+
+# ---- Rasterize Realms ---- #
+template_rast <- habitat_2000
+realms_rast <- rasterize(vect(realms_shp), template_rast, field = "name")
+print(realms_rast)
+
+# Save 
+writeRaster(realms_rast, "./biogeographic_realms.tif", overwrite = TRUE)
+
+# ============================== #
+#      Crop by Realms
+# ============================== #
+
+# ---- Set Output Directory ---- #
+crop_dir <- "./Realms_Cropped/"
+if (!dir.exists(crop_dir)) dir.create(crop_dir)
+
+# ---- Loop through each Realm and Crop Rasters ---- #
+for (i in 1:nrow(realms_shp)) {
+  realm_name <- realms_shp$name[i]
+  message(paste0("Processing: ", realm_name))
+  
+  realm_i <- vect(realms_shp[i, ])
+  
+  h2000_sub <- mask(crop(habitat_2000, realm_i), realm_i)
+  h2022_sub <- mask(crop(habitat_2022, realm_i), realm_i)
+  
+  writeRaster(h2000_sub, file.path(crop_dir, paste0("Habitat2000_", realm_name, ".tif")), overwrite = TRUE)
+  writeRaster(h2022_sub, file.path(crop_dir, paste0("Habitat2022_", realm_name, ".tif")), overwrite = TRUE)
+  
+  message(" → Exported: ", realm_name)
+}
+
+# ============================== #
+#      Change Matrix 
+# ============================== #
+
+# ---- Set the Realm ---- #
+realm <- "Australian"  # Change to any other realm 
+
+# ---- Set Paths ---- #
+crop_dir <- "./Realms_Cropped/"
+out_dir <- "./Realms_Matrix/"
+if (!dir.exists(out_dir)) dir.create(out_dir)
+
+# ---- Load Cropped Habitat Rasters ---- #
+file2000 <- file.path(crop_dir, paste0("Habitat2000_", realm, ".tif"))
+file2022 <- file.path(crop_dir, paste0("Habitat2022_", realm, ".tif"))
+
+r2000 <- rast(file2000)
+r2022 <- rast(file2022)
+
+# ---- Create Raster Stack ---- #
+hab_stack <- c(r2000, r2022)
+names(hab_stack) <- c("y2000", "y2022")
+
+# ---- Generate Change Matrix ---- #
+change_table <- crosstab(hab_stack)
+print(change_table)
+write.csv(change_table, file = file.path(out_dir, paste0("ChangeMatrix_", realm, ".csv")), row.names = FALSE)

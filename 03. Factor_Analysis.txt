@@ -1,0 +1,125 @@
+
+Note: This script should run in Python
+
+# ======================= Import Required Libraries =======================
+import os
+import glob
+import numpy as np
+import pandas as pd
+import rasterio
+from sklearn.model_selection import train_test_split, RandomizedSearchCV, GridSearchCV
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+from scipy.stats import randint
+import shap
+import joblib
+import matplotlib.pyplot as plt
+
+# ======================= Set Paths and Load Data =======================
+data_folder = "./dataFactor_All_Resampled_Renamed"  # Relative path to the data folder
+
+files = glob.glob(os.path.join(data_folder, "*.tif"))
+print(f"{len(files)} files found.")
+
+# Separate dependent and independent variables
+y_file = [f for f in files if "lvl1_1400_1500" in os.path.basename(f)][0]
+exclude_keywords = [
+    "lvl1_1400_1500",
+    "urban_trend",
+    "cropland_trend",
+    "slope",
+    "mean_temp_trend",
+    "ntl_trend"
+]
+
+x_files = [f for f in files if not any(kw in os.path.basename(f) for kw in exclude_keywords)]
+
+# ======================= Read Raster Data =======================
+
+def read_tif_as_array(path):
+    """
+    Reads a .tif file and handles NoData values.
+    """
+    with rasterio.open(path) as src:
+        data = src.read(1)
+        data[data == src.nodata] = np.nan
+    return data
+
+x_arrays = [read_tif_as_array(f) for f in x_files]
+x_names = [os.path.splitext(os.path.basename(f))[0] for f in x_files]
+y_array = read_tif_as_array(y_file)
+
+# ======================= Reshape and Create DataFrame =======================
+
+data_dict = {name: arr.flatten() for name, arr in zip(x_names, x_arrays)}
+data_dict["artificial_trend"] = y_array.flatten()
+df_all = pd.DataFrame(data_dict)
+
+# ======================= Data Filtering =======================
+
+mask_y_notna = ~df_all["artificial_trend"].isna()
+mask_x_notall_na = df_all[x_names].notna().any(axis=1)
+df_filtered = df_all[mask_y_notna & mask_x_notall_na].copy()
+
+# ======================= Fill Missing Values =======================
+
+df_filtered[x_names] = df_filtered[x_names].fillna(0)
+
+# ======================= Feature Scaling =======================
+
+scaler = StandardScaler()
+df_filtered[x_names] = scaler.fit_transform(df_filtered[x_names])
+
+# ======================= Train-Test Split =======================
+
+train_df, test_df = train_test_split(df_filtered, test_size=0.2, random_state=123)
+
+# ======================= Model Training and Hyperparameter Tuning =======================
+
+param_dist = {
+    "n_estimators": randint(500, 1500),
+    "max_depth": [30, 40, 50, None],
+    "max_features": ["sqrt", None],
+    "min_samples_split": [2, 5, 10],
+    "min_samples_leaf": [1, 2],
+    "bootstrap": [True, False]
+}
+
+rf_base = RandomForestRegressor(random_state=42, n_jobs=-1)
+random_search = RandomizedSearchCV(
+    estimator=rf_base,
+    param_distributions=param_dist,
+    n_iter=100,
+    scoring="r2",
+    cv=3,
+    verbose=2,
+    random_state=42,
+    n_jobs=-1
+)
+
+random_search.fit(train_df[x_names], train_df["artificial_trend"])
+
+print(f"Best Parameters: {random_search.best_params_}")
+
+# Fine-tune with GridSearchCV
+grid_params = random_search.best_params_
+best_model = random_search.best_estimator_
+
+# ======================= Save the Model =======================
+
+joblib.dump(best_model, "./best_rf_model.pkl")
+
+# ======================= SHAP =======================
+
+explainer = shap.TreeExplainer(best_model)
+shap_values = explainer.shap_values(train_df[x_names])
+
+plt.figure(figsize=(10, 6))
+shap.summary_plot(shap_values, train_df[x_names], plot_type="dot", show=False)
+plt.tight_layout()
+plt.savefig("./shap_summary_plot.png", dpi=300, bbox_inches="tight")
+
+# Save SHAP values
+np.save("./shap_values.npy", shap_values)
+
